@@ -186,7 +186,11 @@ class ClienteGHCR(ClienteRegistro):
         from urllib.parse import quote
         status, hdrs, corpo = self._obter(nome, f"referrers/{digest}?artifactType={quote(TIPO_BUNDLE, safe='')}", "application/vnd.oci.image.index.v1+json")
         if status == 404:
-            return b""
+            # COMPROVADO NO GHCR REAL (ensaio 14/11): o GHCR NÃO implementa a API de referrers; usa o ESQUEMA DE TAG ALTERNATIVO do OCI 1.1:
+            # a tag 'sha256-<hex>' aponta para um ÍNDICE cujos itens são os referrers (mesmo formato de índice).
+            status, hdrs, corpo = self._obter(nome, f"manifests/sha256-{digest[7:]}", "application/vnd.oci.image.index.v1+json")
+            if status == 404:
+                return b""
         self._verificar_status(status, hdrs, "referrers")
         try:
             indice = json.loads(corpo.decode("utf-8"))
