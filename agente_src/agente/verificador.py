@@ -19,6 +19,7 @@ from .ponteiro import validar_ponteiro
 from .registro import Backoff, ClienteRegistro
 from .util import (
     REDATOR,
+    AtestadoIndisponivel,
     AtestadoInvalido,
     ErroComunicacao,
     ErroValidacao,
@@ -41,6 +42,7 @@ class ConfigVerificador:
     estado_path: str
     status_path: str  # leitura do status público (para saber se o executor já concluiu)
     reentrega_s: int = 180
+    espera_atestado_s: int = 1800  # atestado ausente de um ponteiro RECENTE é transitório (serviço de assinatura/registro atrasado); depois disso, rejeita
 
 
 class Verificador:
@@ -117,7 +119,14 @@ class Verificador:
             arquivos = {"ponteiro.json": bruto, "ponteiro.atestado.json": self.cliente.baixar_atestado(repo_release, digest)}
             for svc, dig in pt.alvos().items():
                 arquivos[f"{svc}.atestado.json"] = self.cliente.baixar_atestado(p.nome_imagem(svc).split("/", 1)[1], dig)
+            ausentes = sorted(n for n, c in arquivos.items() if n.endswith(".atestado.json") and not c)
+            if ausentes and (agora - pt.criado_em).total_seconds() < self.cfg.espera_atestado_s:
+                self.aud.registrar("atestado_ainda_ausente", ponteiro=digest, ausentes=ausentes)  # NÃO rejeita: pode só estar atrasado
+                return "AGUARDANDO_ATESTADO"
             verificar_pacote(arquivos, p, self.backend, agora)  # verificação preliminar (o executor repete)
+        except AtestadoIndisponivel as ex:
+            self.aud.registrar("verificacao_indisponivel", ponteiro=digest, motivo=REDATOR.limpar(ex))
+            return "ADIADO_FERRAMENTA"
         except (ErroValidacao, AtestadoInvalido, ProvenienciaRejeitada) as ex:
             e["rejeitados"].append(digest)
             self._gravar(e)

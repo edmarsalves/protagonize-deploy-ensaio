@@ -1,0 +1,33 @@
+# ENSAIO (Lote 3) — IDENTIDADE NÃO AUTORIZADA: um OUTRO workflow do mesmo repositório assina (keyless, assinatura 100% VÁLIDA) a sua própria imagem.
+# O agente deve recusar: o certificado tem outro workflow (SAN) e o nome do sujeito não é o autorizado.
+name: Keyless INTRUSO (ENSAIO)
+on:
+  workflow_dispatch:
+permissions: {}
+env:
+  COSIGN_VERSION: v3.1.4
+  COSIGN_SHA256_LINUX_AMD64: "424e2c97d0b45fd7a6b608a87f090f35633f4c23ece5f092d48bba11aaf4bbfa"
+jobs:
+  intruso:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions: { contents: read, packages: write, id-token: write }
+    outputs:
+      digest: ${{ steps.b.outputs.digest }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1   # v7.0.1
+        with: { persist-credentials: false }
+      - run: |
+          set -euo pipefail
+          curl -fsSL -o /tmp/cosign "https://github.com/sigstore/cosign/releases/download/${COSIGN_VERSION}/cosign-linux-amd64"
+          echo "${COSIGN_SHA256_LINUX_AMD64}  /tmp/cosign" | sha256sum -c -
+          chmod 755 /tmp/cosign
+      - uses: docker/login-action@8aa5831fb8d48d8f76594c7ddde61ae58019f550   # v4.8.0
+        with: { registry: ghcr.io, username: "${{ github.actor }}", password: "${{ secrets.GITHUB_TOKEN }}" }
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069   # v4.4.1
+      - id: nome
+        run: echo "base=ghcr.io/${GITHUB_REPOSITORY_OWNER,,}" >> "$GITHUB_OUTPUT"
+      - id: b
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc   # v7.4.0
+        with: { context: ./ensaio/intruso, push: true, provenance: false, sbom: false, tags: "${{ steps.nome.outputs.base }}/ensaio-k-intruso:run-${{ github.run_id }},${{ steps.nome.outputs.base }}/ensaio-k-intruso:ultimo" }
+      - run: ci/assinar.sh "${{ steps.nome.outputs.base }}/ensaio-k-intruso@${{ steps.b.outputs.digest }}"

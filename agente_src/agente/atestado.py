@@ -21,6 +21,7 @@ from datetime import datetime
 from .politica import Politica
 from .ponteiro import Ponteiro, validar_ponteiro
 from .util import (
+    AtestadoIndisponivel,
     AtestadoInvalido,
     ErroValidacao,
     ProvenienciaRejeitada,
@@ -385,7 +386,8 @@ class BackendCosign(BackendAtestado):
                     cwd=pasta, check=False,
                 )
             except (OSError, subprocess.TimeoutExpired) as e:
-                raise AtestadoInvalido("falha ao executar a verificação do atestado") from e
+                # a FERRAMENTA falhou (não é uma assinatura inválida): transitório, tenta de novo depois, sem rejeitar nem pôr em quarentena
+                raise AtestadoIndisponivel("a ferramenta de verificação não executou (timeout/binário indisponível)") from e
         if r.returncode != 0:
             raise AtestadoInvalido("assinatura do atestado NÃO verificada")
         p = self.politica

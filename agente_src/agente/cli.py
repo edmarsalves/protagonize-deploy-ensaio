@@ -84,6 +84,9 @@ def main(argv=None) -> int:
     except ErroAgente as e:
         print(f"erro do agente: {REDATOR.limpar(e)}", file=sys.stderr)
         return 70
+    except Exception as e:  # noqa: BLE001 - nunca despeja traceback (pode conter segredo) no journal; o timer repete
+        print(f"erro inesperado ({type(e).__name__}): {REDATOR.limpar(e)}"[:300], file=sys.stderr)
+        return 70
 
 
 if __name__ == "__main__":
