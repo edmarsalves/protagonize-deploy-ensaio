@@ -50,6 +50,11 @@ class Reivindicacoes:
     ref: str
     sha: str
     evento: str
+    # F-02: fontes AUTENTICADAS (extensões Fulcio do certificado de folha, já validado pelo cosign). Nunca vêm do predicado nem da política.
+    repositorio_id: str  # 1.3.6.1.4.1.57264.1.15
+    dono_id: str  # 1.3.6.1.4.1.57264.1.17
+    runner: str  # 1.3.6.1.4.1.57264.1.11
+    invocacao: str  # 1.3.6.1.4.1.57264.1.21 (URI da execução: .../actions/runs/<run_id>/attempts/<n>)
 
 
 @dataclass(frozen=True)
@@ -125,6 +130,16 @@ def validar_proveniencia(
         _rejeitar("evento", "evento do certificado não confere com o ponteiro/política")
     if r.sha != commit:
         _rejeitar("commit_diferente", "commit do certificado difere do ponteiro")
+    # F-02: IDs imutáveis, runner e EXECUÇÃO lidos do CERTIFICADO (autenticado), não do predicado (conteúdo escolhido pelo publicador)
+    if r.repositorio_id != politica.repositorio_id or r.dono_id != politica.dono_id:
+        _rejeitar("repositorio_nao_permitido", "IDs imutáveis do CERTIFICADO não conferem (renomeação/sequestro de repo)")
+    if politica.exigir_runner_hospedado and r.runner != "github-hosted":
+        _rejeitar("runner_nao_permitido", "o certificado não indica runner hospedado do GitHub")
+    mc = re.match(r"\A" + re.escape(politica.url_repositorio) + r"/actions/runs/([0-9]{1,20})/attempts/([0-9]{1,6})\Z", r.invocacao)
+    if not mc:
+        _rejeitar("execucao", "URI de execução do certificado fora do formato esperado")
+    if int(mc.group(1)) != seq:
+        _rejeitar("execucao_diferente", "o CERTIFICADO é de OUTRA execução (run_id ≠ seq do ponteiro)")
 
     # 3) o que o atestado DIZ que foi construído (conteúdo assinado)
     wf = _caminho(d, "predicate", "buildDefinition", "externalParameters", "workflow")
@@ -152,6 +167,8 @@ def validar_proveniencia(
         _rejeitar("execucao", "invocationId fora do formato esperado")
     if int(m.group(1)) != seq:
         _rejeitar("execucao_diferente", "o atestado é de OUTRA execução (run_id ≠ seq do ponteiro)")
+    if inv != r.invocacao:
+        _rejeitar("execucao_diferente", "o predicado e o certificado descrevem execuções diferentes")
     return int(m.group(2))
 
 
@@ -192,6 +209,119 @@ def verificar_pacote(pacote: dict, politica: Politica, backend: BackendAtestado,
         seq=pt.seq, commit=pt.commit, gatilho=pt.gatilho, tipo=pt.tipo, digest_ponteiro=digest_ponteiro,
         criado_em=pt.criado_em, alvos=pt.alvos(),
     )
+
+
+# ─────────── F-02: leitura (só stdlib) das extensões Fulcio do certificado de folha ───────────
+OID_FULCIO = {"1.3.6.1.4.1.57264.1.11": "runner", "1.3.6.1.4.1.57264.1.15": "repositorio_id", "1.3.6.1.4.1.57264.1.17": "dono_id", "1.3.6.1.4.1.57264.1.21": "invocacao"}
+CHAVES_BUNDLE = {"mediaType", "verificationMaterial", "dsseEnvelope"}
+
+
+def _tlv(b: bytes, i: int, fim: int):
+    """(tag, inicio_valor, fim_valor); só formas definidas, comprimento ≤ 4 bytes, tudo dentro dos limites."""
+    if i + 2 > fim:
+        raise AtestadoInvalido("certificado: DER truncado")
+    tag, n = b[i], b[i + 1]
+    ini = i + 2
+    if n & 0x80:
+        k = n & 0x7F
+        if k == 0 or k > 4 or ini + k > fim:
+            raise AtestadoInvalido("certificado: comprimento DER inválido")
+        n = int.from_bytes(b[ini:ini + k], "big")
+        ini += k
+    if ini + n > fim:
+        raise AtestadoInvalido("certificado: DER ultrapassa o limite")
+    return tag, ini, ini + n
+
+
+def _oid(b: bytes) -> str:
+    if not b:
+        raise AtestadoInvalido("certificado: OID vazio")
+    partes, v = [], 0
+    for x in b:
+        v = (v << 7) | (x & 0x7F)
+        if not x & 0x80:
+            partes.append(v)
+            v = 0
+    if b[-1] & 0x80:
+        raise AtestadoInvalido("certificado: OID truncado")
+    primeiro = partes[0]
+    ini = [primeiro // 40, primeiro % 40] if primeiro < 80 else [2, primeiro - 80]
+    return ".".join(str(x) for x in ini + partes[1:])
+
+
+def extensoes_fulcio(cert_der: bytes) -> dict:
+    """Devolve {'runner','repositorio_id','dono_id','invocacao'} do certificado. Cada extensão deve existir UMA vez, como UTF8String DER."""
+    tag, i, fim = _tlv(cert_der, 0, len(cert_der))
+    if tag != 0x30 or fim != len(cert_der):
+        raise AtestadoInvalido("certificado: estrutura externa inválida")
+    tag, i, fim = _tlv(cert_der, i, fim)  # tbsCertificate
+    if tag != 0x30:
+        raise AtestadoInvalido("certificado: tbsCertificate inválido")
+    exts = None
+    while i < fim:
+        t, a, b = _tlv(cert_der, i, fim)
+        if t == 0xA3:  # [3] extensions
+            if exts is not None:
+                raise AtestadoInvalido("certificado: extensões duplicadas")
+            exts = (a, b)
+        i = b
+    if exts is None:
+        raise AtestadoInvalido("certificado sem extensões")
+    t, i, fim = _tlv(cert_der, *exts)
+    if t != 0x30:
+        raise AtestadoInvalido("certificado: lista de extensões inválida")
+    achados, vistos = {}, set()
+    while i < fim:
+        t, a, b = _tlv(cert_der, i, fim)
+        i = b
+        if t != 0x30:
+            raise AtestadoInvalido("certificado: extensão inválida")
+        t1, a1, b1 = _tlv(cert_der, a, b)
+        if t1 != 0x06:
+            raise AtestadoInvalido("certificado: extensão sem OID")
+        oid = _oid(cert_der[a1:b1])
+        if oid in vistos:
+            raise AtestadoInvalido("certificado: extensão repetida")
+        vistos.add(oid)
+        if oid not in OID_FULCIO:
+            continue
+        pos = b1
+        t2, a2, b2 = _tlv(cert_der, pos, b)
+        if t2 == 0x01:  # critical BOOLEAN
+            pos = b2
+            t2, a2, b2 = _tlv(cert_der, pos, b)
+        if t2 != 0x04 or b2 != b:
+            raise AtestadoInvalido("certificado: valor de extensão inválido")
+        t3, a3, b3 = _tlv(cert_der, a2, b2)
+        if t3 != 0x0C or b3 != b2:
+            raise AtestadoInvalido("certificado: extensão Fulcio não é UTF8String")
+        try:
+            achados[OID_FULCIO[oid]] = cert_der[a3:b3].decode("utf-8")
+        except UnicodeDecodeError as e:
+            raise AtestadoInvalido("certificado: texto inválido") from e
+    faltam = set(OID_FULCIO.values()) - set(achados)
+    if faltam:
+        raise AtestadoInvalido("certificado sem as extensões Fulcio exigidas: " + ",".join(sorted(faltam)))
+    return achados
+
+
+def certificado_do_bundle(bundle: dict) -> bytes:
+    """Bundle com a FORMA exata esperada (evita divergência entre este parser e o do cosign) e exatamente UM certificado de folha."""
+    if set(bundle.keys()) != CHAVES_BUNDLE or not str(bundle["mediaType"]).startswith("application/vnd.dev.sigstore.bundle"):
+        raise AtestadoInvalido("bundle fora da forma esperada")
+    vm = bundle["verificationMaterial"]
+    if not isinstance(vm, dict):
+        raise AtestadoInvalido("bundle: verificationMaterial inválido")
+    if ("certificate" in vm) == ("x509CertificateChain" in vm):
+        raise AtestadoInvalido("bundle deve ter exatamente UM certificado (certificate OU x509CertificateChain)")
+    try:
+        if "certificate" in vm:
+            bruto = vm["certificate"]["rawBytes"]
+        else:
+            bruto = vm["x509CertificateChain"]["certificates"][0]["rawBytes"]
+        return base64.b64decode(bruto, validate=True)
+    except (KeyError, IndexError, TypeError, ValueError) as e:
+        raise AtestadoInvalido("bundle: certificado ilegível") from e
 
 
 class BackendCosign(BackendAtestado):
@@ -259,10 +389,12 @@ class BackendCosign(BackendAtestado):
         if r.returncode != 0:
             raise AtestadoInvalido("assinatura do atestado NÃO verificada")
         p = self.politica
+        ext = extensoes_fulcio(certificado_do_bundle(bundle))  # só DEPOIS de o cosign ter autenticado este mesmo certificado
         return AtestadoVerificado(
             reivindicacoes=Reivindicacoes(
                 emissor=p.emissor, san=p.san_esperado, repositorio=p.repositorio, ref=p.ref,
                 sha=esperado.commit, evento=esperado.gatilho,
+                repositorio_id=ext["repositorio_id"], dono_id=ext["dono_id"], runner=ext["runner"], invocacao=ext["invocacao"],
             ),
             declaracao=declaracao,
         )
