@@ -1,0 +1,24 @@
+# ENSAIO (Lote 3) — O1: token OIDC REAL do GitHub Actions validado DENTRO do job com o protótipo (RS256, JWKS real). O JWT nunca é impresso, gravado ou enviado a registro/artefato.
+name: OIDC (ENSAIO)
+on:
+  workflow_dispatch:
+concurrency:
+  group: oidc-ensaio
+  cancel-in-progress: false
+permissions: {}
+jobs:
+  oidc:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    permissions: { contents: read, id-token: write }
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1   # v7.0.1
+        with: { persist-credentials: false }
+      - name: Ensaio OIDC real (sem persistir token)
+        env:
+          REPO_ID: ${{ github.repository_id }}
+          OWNER_ID: ${{ github.repository_owner_id }}
+        run: python3 ci/oidc_ensaio.py
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9   # v7.0.2
+        if: always()
+        with: { name: evidencias-oidc, path: evidencias/oidc/, if-no-files-found: ignore }
