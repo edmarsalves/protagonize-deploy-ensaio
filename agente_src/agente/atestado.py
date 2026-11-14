@@ -29,7 +29,7 @@ from .util import (
     json_estrito,
 )
 
-TIPO_STATEMENT = "https://in-toto.io/Statement/v1"
+TIPOS_STATEMENT = ("https://in-toto.io/Statement/v1", "https://in-toto.io/Statement/v0.1")  # v0.1: o `cosign attest` (v3.1.4) ainda emite v0.1; mesma forma de sujeito/predicado
 TIPO_PREDICADO = "https://slsa.dev/provenance/v1"
 NOMES_PACOTE = ("ponteiro.json", "ponteiro.atestado.json", "api.atestado.json", "web.atestado.json", "meta.json")
 MAX_ATESTADO = 512 * 1024
@@ -99,7 +99,7 @@ def validar_proveniencia(
     d = av.declaracao
     if not isinstance(d, dict):
         _rejeitar("declaracao_invalida", "declaração não é objeto")
-    if d.get("_type") != TIPO_STATEMENT or d.get("predicateType") != TIPO_PREDICADO:
+    if d.get("_type") not in TIPOS_STATEMENT or d.get("predicateType") != TIPO_PREDICADO:
         _rejeitar("tipo_predicado", "tipo de declaração/predicado não suportado")
 
     # 1) o atestado é sobre ESTE artefato (nome autorizado + digest exato; um único sujeito)
